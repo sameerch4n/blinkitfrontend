@@ -1,7 +1,10 @@
 {
-  "buildCommand": "npm run build",
+  "buildCommand": "bash build.sh",
   "outputDirectory": ".",
   "public": false,
+  "env": {
+    "REACT_APP_API_URL": "https://blinkit-backend-xxxx.onrender.com"
+  },
   "rewrites": [
     {
       "source": "/(.*)",

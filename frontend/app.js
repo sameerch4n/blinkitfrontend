@@ -1,6 +1,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
-// Use Render backend URL - update this to your deployed Render URL
-const API = process.env.REACT_APP_API_URL || "https://your-backend.onrender.com";
+// Use Render backend URL - update this when deploying
+// For Vercel: Set environment variable REACT_APP_API_URL in project settings
+const API = window.API_URL || "https://your-backend.onrender.com";
 
 // ========== SVG Icons (Feather-style) ==========
 const s = (sz = 18) => ({ width: sz, height: sz, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round", style: { display: "inline-block", verticalAlign: "middle", flexShrink: 0 } });
