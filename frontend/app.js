@@ -119,6 +119,16 @@ function App() {
   const [speed, setSpeed] = useState(3);
   const [streamed, setStreamed] = useState([]);
   const esRef = useRef(null);
+
+  // Navigation / views
+  const [activeView, setActiveView] = useState("dashboard");
+
+  // Riders data
+  const [ridersData, setRidersData] = useState([]);
+  const [riderPerformance, setRiderPerformance] = useState([]);
+  const [vehicleStats, setVehicleStats] = useState([]);
+  const [ordersWithRiders, setOrdersWithRiders] = useState([]);
+  const [zoneStats, setZoneStats] = useState([]);
   
   // Backend health check
   const [backendStatus, setBackendStatus] = useState("starting"); // "starting", "alive", "dead"
@@ -132,6 +142,9 @@ function App() {
   const [showStatsPanel, setShowStatsPanel] = useState(false);
   const [slaMode, setSlaMode] = useState(1); // 0=10min, 1=15min, 2=20min
   const slaValues = [10, 15, 20];
+
+  // Excel / tabular view toggle
+  const [excelView, setExcelView] = useState(false);
 
   // Auto-wake backend on page load
   useEffect(() => {
@@ -162,8 +175,21 @@ function App() {
 
   useEffect(() => {
     if (backendStatus !== "alive") return;
-    Promise.all([fetch(`${API}/orders`).then(r => r.json()), fetch(`${API}/metrics`).then(r => r.json())])
-      .then(([o, m]) => { setOrders(o); setMetrics(m); setLoading(false); })
+    Promise.all([
+      fetch(`${API}/orders`).then(r => r.json()),
+      fetch(`${API}/metrics`).then(r => r.json()),
+      fetch(`${API}/riders`).then(r => r.json()),
+      fetch(`${API}/riders/performance`).then(r => r.json()),
+      fetch(`${API}/riders/vehicle-stats`).then(r => r.json()),
+      fetch(`${API}/orders/with-riders`).then(r => r.json()),
+      fetch(`${API}/zones/stats`).then(r => r.json()),
+    ])
+      .then(([o, m, rd, rp, vs, owr, zs]) => {
+        setOrders(o); setMetrics(m); setRidersData(rd);
+        setRiderPerformance(rp); setVehicleStats(vs);
+        setOrdersWithRiders(owr); setZoneStats(zs);
+        setLoading(false);
+      })
       .catch(() => setLoading(false));
   }, [backendStatus]);
 
@@ -213,7 +239,7 @@ function App() {
       peakAvg, offpeakAvg, peakCount: peakOrders.length, offpeakCount: offpeakOrders.length,
       delayed: del.length, ontime
     };
-  }, [processed]);
+  }, [processed, SLA]);
 
   // Avg distance per zone (for sort mode)
   const zoneDistances = useMemo(() => {
@@ -231,7 +257,7 @@ function App() {
     else if (zoneSortMode === 1) sorted.sort((a, b) => a[0].localeCompare(b[0]));
     else sorted.sort((a, b) => (zoneDistances[b[0]] || 0) - (zoneDistances[a[0]] || 0));
     return sorted.slice(0, 6);
-  }, [processed]);
+  }, [processed, zoneSortMode, zoneDistances]);
 
   // Charts — Mixed bar+line for Delivery Overview
   const hourlyData = useMemo(() => {
@@ -242,7 +268,10 @@ function App() {
       tm[h] = (tm[h] || 0) + o.delivery_duration_min;
       cm[h] = (cm[h] || 0) + 1;
     });
-    const hrs = Array.from({ length: 15 }, (_, i) => i + 9);
+    let hrs = Array.from({ length: 15 }, (_, i) => i + 9);
+    // Sort hours based on chartSortMode
+    if (chartSortMode === 1) hrs.sort((a, b) => (hm[b] || 0) - (hm[a] || 0));
+    else if (chartSortMode === 2) hrs.sort((a, b) => (cm[b] ? (tm[b]/cm[b]) : 0) - (cm[a] ? (tm[a]/cm[a]) : 0));
     const ordersData = hrs.map(h => hm[h] || 0);
     const avgTimeData = hrs.map(h => cm[h] ? +(tm[h] / cm[h]).toFixed(1) : 0);
     const peakData = hrs.map(h => {
@@ -254,7 +283,7 @@ function App() {
       { type: "line", label: "Avg Time (min)", data: avgTimeData, borderColor: "#e6533c", backgroundColor: "rgba(230,83,60,.08)", borderWidth: 2, tension: .4, fill: true, pointRadius: 0, yAxisID: "y1", order: 1 },
       { type: "line", label: "Peak Orders", data: peakData, borderColor: "#c8cdd5", backgroundColor: "rgba(200,205,213,.15)", borderWidth: 1.5, tension: .4, fill: true, pointRadius: 0, order: 0 }
     ] };
-  }, [processed]);
+  }, [processed, chartSortMode]);
 
   // Half-donut gauge — meaningful delivery status categories
   const statusDonut = useMemo(() => {
@@ -268,7 +297,7 @@ function App() {
       borderWidth: 0, cutout: "82%", borderRadius: 20,
       circumference: 180, rotation: -90
     }] };
-  }, [processed]);
+  }, [processed, SLA]);
 
   // Center text plugin for half-donut
   const donutCenterPlugin = useMemo(() => [{
@@ -291,11 +320,12 @@ function App() {
   // Peak Statistics — hourly breakdown showing peak (18-22h) vs off-peak
   const peakBarData = useMemo(() => {
     const hrs = Array.from({ length: 15 }, (_, i) => i + 9);
-    const peakCounts = hrs.map(h => processed.filter(o => parseInt(o.order_time.split(":")[0]) === h && o.is_peak_hour).length);
-    const offpeakCounts = hrs.map(h => processed.filter(o => parseInt(o.order_time.split(":")[0]) === h && !o.is_peak_hour).length);
-    return { labels: hrs.map(h => `${h}`), datasets: [
-      { label: "Peak (18-22h)", data: peakCounts, backgroundColor: "#2ecc40", borderRadius: 3, barPercentage: .7 },
-      { label: "Off-Peak", data: offpeakCounts, backgroundColor: "#e4e7ed", borderRadius: 3, barPercentage: .7 }
+    const counts = hrs.map(h => processed.filter(o => parseInt(o.order_time.split(":")[0]) === h).length);
+    const isPeak = hrs.map(h => h >= 18 && h <= 22);
+    const bgColors = isPeak.map(p => p ? "#e6533c" : "#23b7e5");
+    const borderColors = isPeak.map(p => p ? "#c9392a" : "#1a9bc7");
+    return { labels: hrs.map(h => `${h}:00`), datasets: [
+      { label: "Orders by Hour", data: counts, backgroundColor: bgColors, borderColor: borderColors, borderWidth: 1, borderRadius: 4, barPercentage: .65, categoryPercentage: .8 }
     ] };
   }, [processed]);
 
@@ -305,62 +335,50 @@ function App() {
 
   return (
     <div className="layout">
-      {/* BACKEND STATUS INDICATOR */}
-      <div style={{
-        position: "fixed",
-        top: 12,
-        right: 12,
-        padding: "8px 12px",
-        borderRadius: "6px",
-        fontSize: "12px",
-        fontWeight: 500,
-        display: "flex",
-        alignItems: "center",
-        gap: "8px",
-        zIndex: 9999,
-        backdropFilter: "blur(10px)",
-        backgroundColor: backendStatus === "alive" ? "rgba(46, 204, 64, 0.15)" : backendStatus === "starting" ? "rgba(245, 184, 73, 0.15)" : "rgba(230, 83, 60, 0.15)",
-        border: `1px solid ${backendStatus === "alive" ? "#2ecc40" : backendStatus === "starting" ? "#f5b849" : "#e6533c"}`,
-        color: backendStatus === "alive" ? "#16a34a" : backendStatus === "starting" ? "#b45309" : "#991b1b"
-      }}>
-        <div style={{
-          width: "8px",
-          height: "8px",
-          borderRadius: "50%",
-          backgroundColor: backendStatus === "alive" ? "#2ecc40" : backendStatus === "starting" ? "#f5b849" : "#e6533c",
-          animation: backendStatus === "starting" ? "pulse 2s infinite" : "none"
-        }} />
-        <span>{backendMessage}</span>
-      </div>
-      <style>{`
-        @keyframes pulse {
-          0%, 100% { opacity: 1; }
-          50% { opacity: 0.5; }
-        }
-      `}</style>
+
 
       {/* SIDEBAR */}
       <aside className="sidebar">
         <div className="sidebar-brand">
           <img src="/media/blinkitlogo.png" alt="Blinkit" />
         </div>
+        <div style={{
+          margin: "0 16px 4px",
+          padding: "6px 12px",
+          borderRadius: "6px",
+          fontSize: "11px",
+          fontWeight: 500,
+          display: "flex",
+          alignItems: "center",
+          gap: "8px",
+          background: backendStatus === "alive" ? "rgba(46,204,64,0.1)" : backendStatus === "starting" ? "rgba(245,184,73,0.1)" : "rgba(230,83,60,0.1)",
+          color: backendStatus === "alive" ? "#2ecc40" : backendStatus === "starting" ? "#f5b849" : "#e6533c"
+        }}>
+          <div style={{
+            width: "6px", height: "6px", borderRadius: "50%", flexShrink: 0,
+            background: backendStatus === "alive" ? "#2ecc40" : backendStatus === "starting" ? "#f5b849" : "#e6533c",
+            animation: backendStatus === "starting" ? "pulse 2s infinite" : "none",
+            boxShadow: backendStatus === "alive" ? "0 0 6px rgba(46,204,64,0.5)" : "none"
+          }} />
+          <span style={{whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{backendStatus === "alive" ? "Connected" : backendStatus === "starting" ? "Connecting..." : "Offline"}</span>
+        </div>
         <div className="sidebar-section">
           <div className="sidebar-section-label">Main</div>
-          <a className="nav-item active"><I.Grid size={16} /> Dashboard</a>
-          <a className="nav-item"><I.BarChart size={16} /> Analytics <span className="soon-badge">Coming Soon</span></a>
-          <a className="nav-item"><I.Truck size={16} /> Deliveries <span className="soon-badge">Coming Soon</span></a>
+          <a className={`nav-item ${activeView==="dashboard"?"active":""}`} onClick={()=>setActiveView("dashboard")}><I.Grid size={16} /> Dashboard</a>
+          <a className={`nav-item ${activeView==="analytics"?"active":""}`} onClick={()=>setActiveView("analytics")}><I.BarChart size={16} /> Analytics</a>
+          <a className={`nav-item ${activeView==="deliveries"?"active":""}`} onClick={()=>setActiveView("deliveries")}><I.Truck size={16} /> Deliveries</a>
         </div>
         <div className="sidebar-section">
           <div className="sidebar-section-label">Simulation</div>
-          <a className="nav-item"><I.Activity size={16} /> Live Stream <span className="soon-badge">Coming Soon</span></a>
-          <a className="nav-item"><I.Map size={16} /> Map View <span className="soon-badge">Coming Soon</span></a>
-          <a className="nav-item"><I.Flame size={16} /> Peak Analysis <span className="soon-badge">Coming Soon</span></a>
+          <a className={`nav-item ${activeView==="livestream"?"active":""}`} onClick={()=>setActiveView("livestream")}><I.Activity size={16} /> Live Stream</a>
+          <a className={`nav-item ${activeView==="mapview"?"active":""}`} onClick={()=>setActiveView("mapview")}><I.Map size={16} /> Map View</a>
+          <a className={`nav-item ${activeView==="peakanalysis"?"active":""}`} onClick={()=>setActiveView("peakanalysis")}><I.Flame size={16} /> Peak Analysis</a>
         </div>
         <div className="sidebar-section">
           <div className="sidebar-section-label">Data</div>
-          <a className="nav-item"><I.Package size={16} /> Orders <span className="soon-badge">Coming Soon</span></a>
-          <a className="nav-item"><I.Users size={16} /> Riders <span className="soon-badge">Coming Soon</span></a>
-          <a className="nav-item"><I.Settings size={16} /> Settings <span className="soon-badge">Coming Soon</span></a>
+          <a className={`nav-item ${activeView==="orders"?"active":""}`} onClick={()=>setActiveView("orders")}><I.Package size={16} /> Orders</a>
+          <a className={`nav-item ${activeView==="riders"?"active":""}`} onClick={()=>setActiveView("riders")}><I.Users size={16} /> Riders</a>
+          <a className={`nav-item ${activeView==="settings"?"active":""}`} onClick={()=>setActiveView("settings")}><I.Settings size={16} /> Settings</a>
         </div>
         <div className="sidebar-sim-card">
           <p>Real-time delivery simulation with 200 orders across Agra</p>
@@ -373,8 +391,8 @@ function App() {
       {/* HEADER */}
       <header className="header">
         <div className="header-left">
-          <div className="breadcrumb">Dashboard <span>→ Overview</span></div>
-          <h1>Delivery Dashboard</h1>
+          <div className="breadcrumb">Dashboard <span>→ {activeView.charAt(0).toUpperCase()+activeView.slice(1)}</span></div>
+          <h1>{{dashboard:"Delivery Dashboard",analytics:"Analytics",deliveries:"Deliveries",livestream:"Live Stream",mapview:"Map View",peakanalysis:"Peak Analysis",orders:"All Orders",riders:"Riders Management",settings:"Settings"}[activeView]}</h1>
         </div>
         <div className="header-right">
           <div className="header-ctrl">
@@ -391,6 +409,9 @@ function App() {
           <button className={`header-ctrl ${batchFilter===2 ? "active" : ""}`} onClick={() => setBatchFilter(2)}>
             <I.Layers size={13} /> Batch
           </button>
+          <button className={`header-ctrl ${excelView ? "active" : ""}`} onClick={() => setExcelView(!excelView)} title="Toggle Excel View">
+            {excelView ? <><I.Grid size={13} /> Dashboard</> : <><I.BarChart size={13} /> Excel View</>}
+          </button>
           <div className={`status-badge ${streaming ? "live" : ""}`}>
             <span className="status-dot"></span>
             {streaming ? `Streaming ${streamed.length}` : "Ready"}
@@ -400,6 +421,100 @@ function App() {
 
       {/* MAIN */}
       <main className="main">
+
+      {/* ======= EXCEL / TABULAR VIEW ======= */}
+      {excelView ? (
+        <div className="fade-in">
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
+            <div style={{display:"flex",alignItems:"center",gap:12}}>
+              <h2 style={{fontSize:16,fontWeight:700,margin:0}}>Live Data Spreadsheet</h2>
+              <span style={{fontSize:11,color:"#9ca3af",background:"#f5f6f8",padding:"3px 10px",borderRadius:100}}>{processed.length} rows</span>
+              {streaming && <span style={{fontSize:11,color:"#fff",background:"#2ecc40",padding:"3px 10px",borderRadius:100,animation:"pulse 1.5s infinite"}}>● LIVE</span>}
+            </div>
+            <div style={{display:"flex",gap:8,alignItems:"center"}}>
+              <button onClick={toggleSim} style={{padding:"7px 18px",borderRadius:6,border:"none",background:streaming?"#e6533c":"#2ecc40",color:"#fff",fontSize:12,fontWeight:600,cursor:"pointer",display:"flex",alignItems:"center",gap:6}}>
+                {streaming ? <><I.Square size={12}/> Stop</> : <><I.Play size={12}/> Start Simulation</>}
+              </button>
+            </div>
+          </div>
+          {/* Summary bar */}
+          <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:12,marginBottom:16}}>
+            <div style={{background:"#fff",border:"1px solid var(--border)",borderRadius:8,padding:"12px 16px",textAlign:"center"}}>
+              <div style={{fontSize:10,fontWeight:600,color:"#9ca3af",letterSpacing:.5}}>TOTAL</div>
+              <div style={{fontSize:20,fontWeight:700}}>{processed.length}</div>
+            </div>
+            <div style={{background:"#fff",border:"1px solid var(--border)",borderRadius:8,padding:"12px 16px",textAlign:"center"}}>
+              <div style={{fontSize:10,fontWeight:600,color:"#9ca3af",letterSpacing:.5}}>AVG TIME</div>
+              <div style={{fontSize:20,fontWeight:700,color:"#23b7e5"}}>{m?.avg||0}<span style={{fontSize:11}}> min</span></div>
+            </div>
+            <div style={{background:"#fff",border:"1px solid var(--border)",borderRadius:8,padding:"12px 16px",textAlign:"center"}}>
+              <div style={{fontSize:10,fontWeight:600,color:"#9ca3af",letterSpacing:.5}}>ON-TIME</div>
+              <div style={{fontSize:20,fontWeight:700,color:"#2ecc40"}}>{m?.ontime||0}</div>
+            </div>
+            <div style={{background:"#fff",border:"1px solid var(--border)",borderRadius:8,padding:"12px 16px",textAlign:"center"}}>
+              <div style={{fontSize:10,fontWeight:600,color:"#9ca3af",letterSpacing:.5}}>DELAYED</div>
+              <div style={{fontSize:20,fontWeight:700,color:"#e6533c"}}>{m?.delayed||0}</div>
+            </div>
+            <div style={{background:"#fff",border:"1px solid var(--border)",borderRadius:8,padding:"12px 16px",textAlign:"center"}}>
+              <div style={{fontSize:10,fontWeight:600,color:"#9ca3af",letterSpacing:.5}}>RIDERS</div>
+              <div style={{fontSize:20,fontWeight:700}}>{m?.riders||0}</div>
+            </div>
+            <div style={{background:"#fff",border:"1px solid var(--border)",borderRadius:8,padding:"12px 16px",textAlign:"center"}}>
+              <div style={{fontSize:10,fontWeight:600,color:"#9ca3af",letterSpacing:.5}}>SLA ({SLA}min)</div>
+              <div style={{fontSize:20,fontWeight:700,color:m&&m.ontimePct>=50?"#26bf94":"#e6533c"}}>{m?.ontimePct||0}%</div>
+            </div>
+          </div>
+          {/* Excel-style table */}
+          <div className="card" style={{overflow:"hidden"}}>
+            <div style={{overflowX:"auto",overflowY:"auto",maxHeight:"calc(100vh - 280px)"}}>
+              <table style={{fontSize:12,minWidth:1100}}>
+                <thead>
+                  <tr style={{background:"#1C1C1C"}}>
+                    <th style={{color:"#fff",background:"#1C1C1C",position:"sticky",top:0,zIndex:2,padding:"10px 12px",fontSize:10,letterSpacing:.5,borderBottom:"2px solid #2ecc40"}}>ROW</th>
+                    <th style={{color:"#fff",background:"#1C1C1C",position:"sticky",top:0,zIndex:2,padding:"10px 12px",fontSize:10,letterSpacing:.5,borderBottom:"2px solid #2ecc40"}}>ORDER ID</th>
+                    <th style={{color:"#fff",background:"#1C1C1C",position:"sticky",top:0,zIndex:2,padding:"10px 12px",fontSize:10,letterSpacing:.5,borderBottom:"2px solid #2ecc40"}}>DROP LOCATION</th>
+                    <th style={{color:"#fff",background:"#1C1C1C",position:"sticky",top:0,zIndex:2,padding:"10px 12px",fontSize:10,letterSpacing:.5,borderBottom:"2px solid #2ecc40"}}>DISTANCE (km)</th>
+                    <th style={{color:"#fff",background:"#1C1C1C",position:"sticky",top:0,zIndex:2,padding:"10px 12px",fontSize:10,letterSpacing:.5,borderBottom:"2px solid #2ecc40"}}>ORDER TIME</th>
+                    <th style={{color:"#fff",background:"#1C1C1C",position:"sticky",top:0,zIndex:2,padding:"10px 12px",fontSize:10,letterSpacing:.5,borderBottom:"2px solid #2ecc40"}}>DELIVERY TIME</th>
+                    <th style={{color:"#fff",background:"#1C1C1C",position:"sticky",top:0,zIndex:2,padding:"10px 12px",fontSize:10,letterSpacing:.5,borderBottom:"2px solid #2ecc40"}}>DURATION (min)</th>
+                    <th style={{color:"#fff",background:"#1C1C1C",position:"sticky",top:0,zIndex:2,padding:"10px 12px",fontSize:10,letterSpacing:.5,borderBottom:"2px solid #2ecc40"}}>BATCH</th>
+                    <th style={{color:"#fff",background:"#1C1C1C",position:"sticky",top:0,zIndex:2,padding:"10px 12px",fontSize:10,letterSpacing:.5,borderBottom:"2px solid #2ecc40"}}>RIDER ID</th>
+                    <th style={{color:"#fff",background:"#1C1C1C",position:"sticky",top:0,zIndex:2,padding:"10px 12px",fontSize:10,letterSpacing:.5,borderBottom:"2px solid #2ecc40"}}>PEAK</th>
+                    <th style={{color:"#fff",background:"#1C1C1C",position:"sticky",top:0,zIndex:2,padding:"10px 12px",fontSize:10,letterSpacing:.5,borderBottom:"2px solid #2ecc40"}}>STATUS</th>
+                    <th style={{color:"#fff",background:"#1C1C1C",position:"sticky",top:0,zIndex:2,padding:"10px 12px",fontSize:10,letterSpacing:.5,borderBottom:"2px solid #2ecc40"}}>LAT</th>
+                    <th style={{color:"#fff",background:"#1C1C1C",position:"sticky",top:0,zIndex:2,padding:"10px 12px",fontSize:10,letterSpacing:.5,borderBottom:"2px solid #2ecc40"}}>LNG</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {processed.map((o, idx) => {
+                    const isNew = streaming && streamed.length > 0 && idx >= streamed.length - 3;
+                    return (
+                      <tr key={o.order_id} className={isNew ? "new-row" : ""} style={{background: idx % 2 === 0 ? "#fff" : "#fafbfc"}}>
+                        <td style={{padding:"8px 12px",color:"#9ca3af",fontSize:11,fontFamily:"monospace"}}>{idx + 1}</td>
+                        <td style={{padding:"8px 12px",fontWeight:600,fontFamily:"monospace"}}>#{o.order_id}</td>
+                        <td style={{padding:"8px 12px",fontWeight:500}}>{o.drop_location}</td>
+                        <td style={{padding:"8px 12px",fontFamily:"monospace",textAlign:"right"}}>{o.distance_km}</td>
+                        <td style={{padding:"8px 12px",fontFamily:"monospace"}}>{o.order_time}</td>
+                        <td style={{padding:"8px 12px",fontFamily:"monospace"}}>{o.delivery_time}</td>
+                        <td style={{padding:"8px 12px",fontFamily:"monospace",textAlign:"right",color:o.delivery_duration_min>SLA?"#e6533c":"#26bf94",fontWeight:600}}>{o.delivery_duration_min}</td>
+                        <td style={{padding:"8px 12px",textAlign:"center"}}><span className={`badge ${o.batch_size===2?"purple":"info"}`}>{o.batch_size===2?"Batch":"Single"}</span></td>
+                        <td style={{padding:"8px 12px",textAlign:"center"}}><span className="rider-tag">R{o.rider_id}</span></td>
+                        <td style={{padding:"8px 12px",textAlign:"center"}}><span className={`badge ${o.is_peak_hour?"warning":"success"}`} style={{fontSize:9}}>{o.is_peak_hour?"Peak":"Off"}</span></td>
+                        <td style={{padding:"8px 12px",textAlign:"center"}}><span className={`badge ${o.delivery_duration_min>SLA?"danger":"success"}`}>{o.delivery_duration_min>SLA?"Delayed":"On Time"}</span></td>
+                        <td style={{padding:"8px 12px",fontFamily:"monospace",fontSize:11,color:"#9ca3af"}}>{o.drop_lat}</td>
+                        <td style={{padding:"8px 12px",fontFamily:"monospace",fontSize:11,color:"#9ca3af"}}>{o.drop_lng}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      ) : (<>
+
+      {activeView === "dashboard" && (<>
+
         {/* KPI ROW */}
         <div className="kpi-row fade-in">
           <div className="kpi">
@@ -587,11 +702,15 @@ function App() {
           <div className="card">
             <div className="card-head"><div className="card-title"><I.BarChart size={15} /> Peak Hour Analysis</div></div>
             <div className="card-body">
-              <div style={{display:"flex",gap:16,marginBottom:12}}>
+              <div style={{display:"flex",gap:16,marginBottom:12,alignItems:"center"}}>
                 <div><div style={{fontSize:11,color:"#9ca3af"}}>Peak Avg</div><div style={{fontSize:16,fontWeight:700,color:"#e6533c"}}>{m?.peakAvg || 0} min</div></div>
-                <div><div style={{fontSize:11,color:"#9ca3af"}}>Off-Peak Avg</div><div style={{fontSize:16,fontWeight:700,color:"#26bf94"}}>{m?.offpeakAvg || 0} min</div></div>
+                <div><div style={{fontSize:11,color:"#9ca3af"}}>Off-Peak Avg</div><div style={{fontSize:16,fontWeight:700,color:"#23b7e5"}}>{m?.offpeakAvg || 0} min</div></div>
+                <div style={{marginLeft:"auto",display:"flex",gap:12,fontSize:11,color:"#9ca3af"}}>
+                  <span style={{display:"flex",alignItems:"center",gap:4}}><span style={{width:8,height:8,borderRadius:2,background:"#e6533c",display:"inline-block"}}></span> Peak (18-22h)</span>
+                  <span style={{display:"flex",alignItems:"center",gap:4}}><span style={{width:8,height:8,borderRadius:2,background:"#23b7e5",display:"inline-block"}}></span> Off-Peak</span>
+                </div>
               </div>
-              <div className="chart-area" style={{height:200}}><ChartC id="c3" type="bar" data={peakBarData} options={{showLegend:true}} /></div>
+              <div className="chart-area" style={{height:200}}><ChartC id="c3" type="bar" data={peakBarData} options={{showLegend:false}} /></div>
             </div>
           </div>
 
@@ -669,6 +788,291 @@ function App() {
             </div>
           </div>
         </div>
+      </>)}
+
+      {/* ======= RIDERS VIEW ======= */}
+      {activeView === "riders" && (
+        <div className="fade-in">
+          {/* Vehicle Type Stats */}
+          <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:16,marginBottom:20}}>
+            {vehicleStats.map(vs => (
+              <div className="kpi" key={vs.vehicle_type}>
+                <div className="kpi-label">{vs.vehicle_type}</div>
+                <div className="kpi-value">{vs.avg_time}<span style={{fontSize:14,fontWeight:400}}> min avg</span></div>
+                <div className="kpi-trend up"><I.TrendUp size={13} /> {vs.total_orders} orders • {vs.rider_count} riders</div>
+                <div className="kpi-icon-badge cyan"><I.Truck size={18} /></div>
+              </div>
+            ))}
+          </div>
+          {/* Vehicle Comparison Chart */}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16,marginBottom:20}}>
+            <div className="card">
+              <div className="card-head"><div className="card-title"><I.BarChart size={15} /> Avg Delivery by Vehicle Type</div></div>
+              <div className="card-body"><div className="chart-area" style={{height:250}}>
+                <ChartC id="vc1" type="bar" data={{
+                  labels: vehicleStats.map(v => v.vehicle_type),
+                  datasets: [{
+                    label: "Avg Time (min)", data: vehicleStats.map(v => v.avg_time),
+                    backgroundColor: ["#2ecc40","#23b7e5","#f5b849"], borderRadius: 6, barPercentage: .5
+                  }]
+                }} options={{scales:{x:{grid:{display:false}},y:{beginAtZero:true}}}} />
+              </div></div>
+            </div>
+            <div className="card">
+              <div className="card-head"><div className="card-title"><I.Users size={15} /> Orders per Vehicle Type</div></div>
+              <div className="card-body"><div className="chart-area" style={{height:250}}>
+                <ChartC id="vc2" type="doughnut" data={{
+                  labels: vehicleStats.map(v => v.vehicle_type),
+                  datasets: [{ data: vehicleStats.map(v => v.total_orders), backgroundColor: ["#2ecc40","#23b7e5","#f5b849"], borderWidth: 0, cutout: "65%", borderRadius: 8 }]
+                }} options={{showLegend:true,scales:{x:{display:false},y:{display:false}}}} />
+              </div></div>
+            </div>
+          </div>
+          {/* Rider Performance Table */}
+          <div className="card">
+            <div className="card-head"><div className="card-title"><I.Users size={15} /> Rider Performance (JOIN: riders ⟕ orders)</div><span style={{fontSize:11,color:"#9ca3af",background:"#f5f6f8",padding:"3px 10px",borderRadius:100}}>{riderPerformance.length} riders</span></div>
+            <div className="tbl-scroll" style={{maxHeight:500}}>
+              <table>
+                <thead><tr><th>#</th><th>Name</th><th>Vehicle</th><th>Orders</th><th>Avg Time</th><th>Min</th><th>Max</th><th>Avg Dist</th><th>Delayed</th><th>Peak</th></tr></thead>
+                <tbody>
+                  {riderPerformance.map(r => (
+                    <tr key={r.rider_id}>
+                      <td style={{fontWeight:600}}>R{r.rider_id}</td>
+                      <td style={{fontWeight:500,color:"var(--text)"}}>{r.rider_name}</td>
+                      <td><span className={`badge ${r.vehicle_type==="E-Bike"?"purple":r.vehicle_type==="Bike"?"success":"info"}`}>{r.vehicle_type}</span></td>
+                      <td>{r.total_orders}</td>
+                      <td style={{color: r.avg_delivery_time > 15 ? "#e6533c" : "#26bf94", fontWeight:600}}>{r.avg_delivery_time} min</td>
+                      <td>{r.min_delivery_time} min</td>
+                      <td>{r.max_delivery_time} min</td>
+                      <td>{r.avg_distance} km</td>
+                      <td><span className={`badge ${r.delayed_orders > 5 ? "danger" : "success"}`}>{r.delayed_orders}</span></td>
+                      <td>{r.peak_orders}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          {/* Orders with Rider Info */}
+          <div className="card" style={{marginTop:16}}>
+            <div className="card-head"><div className="card-title"><I.Package size={15} /> Recent Orders with Rider Details (SQL JOIN)</div></div>
+            <div className="tbl-scroll" style={{maxHeight:400}}>
+              <table>
+                <thead><tr><th>#</th><th>Location</th><th>Dist</th><th>Duration</th><th>Rider</th><th>Vehicle</th><th>Status</th><th>Peak</th></tr></thead>
+                <tbody>
+                  {ordersWithRiders.map(o => (
+                    <tr key={o.order_id}>
+                      <td style={{fontWeight:600}}>#{o.order_id}</td>
+                      <td>{o.drop_location}</td>
+                      <td>{o.distance_km} km</td>
+                      <td style={{color: o.delivery_duration_min > 15 ? "#e6533c" : "#26bf94", fontWeight:600}}>{o.delivery_duration_min} min</td>
+                      <td style={{fontWeight:500,color:"var(--text)"}}>{o.rider_name}</td>
+                      <td><span className={`badge ${o.vehicle_type==="E-Bike"?"purple":o.vehicle_type==="Bike"?"success":"info"}`}>{o.vehicle_type}</span></td>
+                      <td><span className={`badge ${o.delivery_duration_min > 15 ? "danger" : "success"}`}>{o.delivery_duration_min > 15 ? "Delayed" : "On Time"}</span></td>
+                      <td><span className={`badge ${o.is_peak_hour ? "warning" : "success"}`}>{o.is_peak_hour ? "Peak" : "Off"}</span></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ======= ORDERS VIEW ======= */}
+      {activeView === "orders" && (
+        <div className="fade-in">
+          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,marginBottom:20}}>
+            <div className="kpi"><div className="kpi-label">Total Orders</div><div className="kpi-value">{m?.total||0}</div><div className="kpi-icon-badge purple"><I.Package size={18}/></div></div>
+            <div className="kpi"><div className="kpi-label">Avg Time</div><div className="kpi-value">{m?.avg||0}<span style={{fontSize:14}}> min</span></div><div className="kpi-icon-badge green"><I.Clock size={18}/></div></div>
+            <div className="kpi"><div className="kpi-label">Delayed</div><div className="kpi-value">{m?.delayed||0}</div><div className="kpi-icon-badge orange"><I.AlertTri size={18}/></div></div>
+            <div className="kpi"><div className="kpi-label">On-Time</div><div className="kpi-value">{m?.ontimePct||0}%</div><div className="kpi-icon-badge cyan"><I.TrendUp size={18}/></div></div>
+          </div>
+          <div className="card">
+            <div className="card-head"><div className="card-title"><I.Package size={15}/> Complete Orders Table</div><span style={{fontSize:11,color:"#9ca3af",background:"#f5f6f8",padding:"3px 10px",borderRadius:100}}>{processed.length} orders</span></div>
+            <div className="tbl-scroll" style={{maxHeight:600}}>
+              <table>
+                <thead><tr><th>#</th><th>Location</th><th>Dist</th><th>Duration</th><th>Status</th><th>Batch</th><th>Rider</th><th>Peak</th><th>Order Time</th></tr></thead>
+                <tbody>
+                  {processed.slice().reverse().map(o=>(
+                    <tr key={o.order_id}>
+                      <td style={{fontWeight:600}}>#{o.order_id}</td><td>{o.drop_location}</td><td>{o.distance_km} km</td>
+                      <td style={{color:o.delivery_duration_min>SLA?"#e6533c":"#26bf94",fontWeight:600}}>{o.delivery_duration_min} min</td>
+                      <td><span className={`badge ${o.delivery_duration_min>SLA?"danger":"success"}`}>{o.delivery_duration_min>SLA?"Delayed":"On Time"}</span></td>
+                      <td><span className={`badge ${o.batch_size===2?"purple":"info"}`}>{o.batch_size===2?"Batch":"Single"}</span></td>
+                      <td><span className="rider-tag">R{o.rider_id}</span></td>
+                      <td><span className={`badge ${o.is_peak_hour?"warning":"success"}`}>{o.is_peak_hour?"Peak":"Off"}</span></td>
+                      <td>{o.order_time}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ======= LIVE STREAM VIEW ======= */}
+      {activeView === "livestream" && (
+        <div className="fade-in">
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16,marginBottom:20}}>
+            <div className="card">
+              <div className="card-head"><div className="card-title"><I.Activity size={15}/> Live Simulation Feed</div>
+                <button className={`sim-btn ${streaming?"running":""}`} style={{width:"auto",padding:"6px 16px",background:streaming?"#e6533c":"#2ecc40",borderRadius:6,border:"none",color:"#fff",fontSize:12,fontWeight:600,cursor:"pointer"}} onClick={toggleSim}>{streaming?"Stop":"Start"}</button>
+              </div>
+              <div className="card-body" style={{maxHeight:500,overflowY:"auto",padding:"8px 18px"}}>
+                <ul className="activity-list">
+                  {(streaming?streamed:processed).slice().reverse().slice(0,20).map(o=>(
+                    <li className="activity-item" key={o.order_id}>
+                      <span className="activity-time">{o.order_time}</span>
+                      <div className="activity-dot" style={{background:o.delivery_duration_min>SLA?"#e6533c":"#26bf94"}}></div>
+                      <div className="activity-text"><b>Rider R{o.rider_id}</b> → <span className="hl">#{o.order_id}</span> to <b>{o.drop_location}</b> • {o.delivery_duration_min} min • {o.distance_km} km</div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+            <div className="card">
+              <div className="card-head"><div className="card-title"><I.BarChart size={15}/> Live Metrics</div></div>
+              <div className="card-body">
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+                  <div style={{padding:16,background:"#f0fdf4",borderRadius:8,textAlign:"center"}}><div style={{fontSize:10,fontWeight:600,color:"#6b7280"}}>STREAMED</div><div style={{fontSize:28,fontWeight:700,color:"#2ecc40"}}>{streaming?streamed.length:processed.length}</div></div>
+                  <div style={{padding:16,background:"#eff6ff",borderRadius:8,textAlign:"center"}}><div style={{fontSize:10,fontWeight:600,color:"#6b7280"}}>AVG TIME</div><div style={{fontSize:28,fontWeight:700,color:"#23b7e5"}}>{m?.avg||0}<span style={{fontSize:14}}> min</span></div></div>
+                  <div style={{padding:16,background:"#fef2f2",borderRadius:8,textAlign:"center"}}><div style={{fontSize:10,fontWeight:600,color:"#6b7280"}}>DELAYED</div><div style={{fontSize:28,fontWeight:700,color:"#e6533c"}}>{m?.delayed||0}</div></div>
+                  <div style={{padding:16,background:"#fffbeb",borderRadius:8,textAlign:"center"}}><div style={{fontSize:10,fontWeight:600,color:"#6b7280"}}>ON-TIME %</div><div style={{fontSize:28,fontWeight:700,color:"#f5b849"}}>{m?.ontimePct||0}%</div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ======= MAP VIEW ======= */}
+      {activeView === "mapview" && (
+        <div className="fade-in">
+          <div className="card">
+            <div className="card-head">
+              <div className="card-title"><I.MapPin size={15}/> Full Delivery Map — Agra</div>
+              <div className="map-legend">
+                <div className="map-legend-item"><div className="legend-dot" style={{background:"#26bf94"}}></div> On Time</div>
+                <div className="map-legend-item"><div className="legend-dot" style={{background:"#e6533c"}}></div> Delayed</div>
+                <div className="map-legend-item"><div className="legend-dot" style={{background:"#f5b849"}}></div> Active</div>
+              </div>
+            </div>
+            <div className="map-wrap" style={{height:550}}>
+              <DeliveryMap orders={processed} latest={latest}/>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ======= PEAK ANALYSIS VIEW ======= */}
+      {activeView === "peakanalysis" && (
+        <div className="fade-in">
+          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,marginBottom:20}}>
+            <div className="kpi"><div className="kpi-label">Peak Avg</div><div className="kpi-value" style={{color:"#e6533c"}}>{m?.peakAvg||0}<span style={{fontSize:14}}> min</span></div><div className="kpi-icon-badge orange"><I.Flame size={18}/></div></div>
+            <div className="kpi"><div className="kpi-label">Off-Peak Avg</div><div className="kpi-value" style={{color:"#23b7e5"}}>{m?.offpeakAvg||0}<span style={{fontSize:14}}> min</span></div><div className="kpi-icon-badge cyan"><I.Clock size={18}/></div></div>
+            <div className="kpi"><div className="kpi-label">Peak Orders</div><div className="kpi-value">{m?.peakCount||0}</div><div className="kpi-icon-badge purple"><I.Zap size={18}/></div></div>
+            <div className="kpi"><div className="kpi-label">Off-Peak Orders</div><div className="kpi-value">{m?.offpeakCount||0}</div><div className="kpi-icon-badge green"><I.Package size={18}/></div></div>
+          </div>
+          <div className="card">
+            <div className="card-head">
+              <div className="card-title"><I.BarChart size={15}/> Peak vs Off-Peak by Hour</div>
+              <div style={{display:"flex",gap:12,fontSize:11,color:"#9ca3af"}}>
+                <span style={{display:"flex",alignItems:"center",gap:4}}><span style={{width:8,height:8,borderRadius:2,background:"#e6533c",display:"inline-block"}}></span> Peak (18-22h)</span>
+                <span style={{display:"flex",alignItems:"center",gap:4}}><span style={{width:8,height:8,borderRadius:2,background:"#23b7e5",display:"inline-block"}}></span> Off-Peak</span>
+              </div>
+            </div>
+            <div className="card-body"><div className="chart-area" style={{height:350}}><ChartC id="pa1" type="bar" data={peakBarData} options={{showLegend:false}}/></div></div>
+          </div>
+        </div>
+      )}
+
+      {/* ======= ANALYTICS VIEW ======= */}
+      {activeView === "analytics" && (
+        <div className="fade-in">
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16,marginBottom:20}}>
+            <div className="card">
+              <div className="card-head"><div className="card-title"><I.Activity size={15}/> Hourly Delivery Overview</div></div>
+              <div className="card-body"><div className="chart-area" style={{height:300}}><ChartC id="an1" type="bar" data={hourlyData} options={{showLegend:true,legendPosition:"bottom",scales:{x:{grid:{display:false}},y:{beginAtZero:true},y1:{position:"right",beginAtZero:true,grid:{display:false}}}}}/></div></div>
+            </div>
+            <div className="card">
+              <div className="card-head"><div className="card-title"><I.Package size={15}/> Order Status Distribution</div></div>
+              <div className="card-body"><div className="chart-area" style={{height:300}}><ChartC id="an2" type="doughnut" data={statusDonut} options={{showLegend:true,scales:{x:{display:false},y:{display:false}}}} plugins={donutCenterPlugin}/></div></div>
+            </div>
+          </div>
+          <div className="card">
+            <div className="card-head"><div className="card-title">Overall Statistics</div></div>
+            <div className="card-body" style={{padding:"8px 18px"}}>
+              <div className="stat-item"><div className="stat-label">Batch vs Single</div><div className="stat-value-row"><span className="stat-value">{m?.bc?.["2"]||"—"}<span style={{fontSize:12}}> min</span></span><span className="stat-change" style={{color:"#26bf94"}}>{m?.bc?.["1"]&&m?.bc?.["2"]?((1-m.bc["2"]/m.bc["1"])*100).toFixed(0):0}% faster than {m?.bc?.["1"]||"—"} min</span></div></div>
+              <div className="stat-item"><div className="stat-label">Peak vs Off-Peak</div><div className="stat-value-row"><span className="stat-value">{m?.peakAvg||0}<span style={{fontSize:12}}> min</span></span><span className="stat-change" style={{color:"#e6533c"}}>vs {m?.offpeakAvg||0} min off-peak</span></div></div>
+              <div className="stat-item"><div className="stat-label">Orders Per Rider</div><div className="stat-value-row"><span className="stat-value">{m?.opr||0}</span><span className="stat-change" style={{color:"#2ecc40"}}>{m?.riders} riders active</span></div></div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ======= DELIVERIES VIEW ======= */}
+      {activeView === "deliveries" && (
+        <div className="fade-in">
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16,marginBottom:20}}>
+            <div className="card">
+              <div className="card-head"><div className="card-title"><I.MapPin size={15}/> Delivery Map</div></div>
+              <div className="map-wrap" style={{height:400}}><DeliveryMap orders={processed} latest={latest}/></div>
+            </div>
+            <div className="card">
+              <div className="card-head"><div className="card-title"><I.Package size={15}/> Zone Statistics</div></div>
+              <div className="card-body" style={{padding:"12px 18px"}}>
+                <ul className="cat-list">
+                  {zoneStats.map((z,i)=>{const colors=["#2ecc40","#23b7e5","#26bf94","#f5b849","#e6533c","#49b6f5","#845ef7","#ff6b6b","#51cf66","#339af0","#ffd43b","#20c997"];return(
+                    <li className="cat-item" key={z.zone}><div className="cat-left"><div className="cat-dot" style={{background:colors[i%12]}}></div><span className="cat-name">{z.zone}</span></div>
+                      <span style={{fontSize:12,color:"var(--text-sec)",marginRight:6}}>{z.order_count} orders</span>
+                      <span style={{fontSize:11,color:"var(--text-muted)",marginRight:6}}>{z.avg_time} min avg</span>
+                      <span className="cat-badge" style={{background:colors[i%12]+"20",color:colors[i%12]}}>{z.delayed} delayed</span>
+                    </li>);})}
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ======= SETTINGS VIEW ======= */}
+      {activeView === "settings" && (
+        <div className="fade-in">
+          <div className="card">
+            <div className="card-head"><div className="card-title"><I.Settings size={15}/> Dashboard Settings</div></div>
+            <div className="card-body" style={{padding:24}}>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:24}}>
+                <div>
+                  <div style={{fontSize:13,fontWeight:600,marginBottom:12}}>Simulation Speed</div>
+                  <select value={speed} onChange={e=>setSpeed(+e.target.value)} style={{width:"100%",padding:"10px 14px",borderRadius:8,border:"1px solid var(--border)",fontSize:13,fontFamily:"Inter"}}>
+                    <option value={1.5}>1.5s — Fast</option><option value={3}>3s — Normal</option><option value={5}>5s — Slow</option>
+                  </select>
+                </div>
+                <div>
+                  <div style={{fontSize:13,fontWeight:600,marginBottom:12}}>SLA Threshold</div>
+                  <div style={{display:"flex",gap:8}}>{[10,15,20].map(v=>(<button key={v} onClick={()=>setSlaMode([10,15,20].indexOf(v))} style={{flex:1,padding:"10px",borderRadius:8,border:"1px solid "+(SLA===v?"var(--primary)":"var(--border)"),background:SLA===v?"var(--primary-light)":"#fff",color:SLA===v?"var(--primary)":"var(--text)",fontWeight:600,fontSize:13,cursor:"pointer"}}>{v} min</button>))}</div>
+                </div>
+                <div>
+                  <div style={{fontSize:13,fontWeight:600,marginBottom:12}}>Batch Filter</div>
+                  <div style={{display:"flex",gap:8}}>{[{l:"All",v:0},{l:"Single",v:1},{l:"Batch",v:2}].map(b=>(<button key={b.v} onClick={()=>setBatchFilter(b.v)} style={{flex:1,padding:"10px",borderRadius:8,border:"1px solid "+(batchFilter===b.v?"var(--primary)":"var(--border)"),background:batchFilter===b.v?"var(--primary-light)":"#fff",color:batchFilter===b.v?"var(--primary)":"var(--text)",fontWeight:600,fontSize:13,cursor:"pointer"}}>{b.l}</button>))}</div>
+                </div>
+                <div>
+                  <div style={{fontSize:13,fontWeight:600,marginBottom:12}}>Peak Surge</div>
+                  <button onClick={()=>setPeakToggle(!peakToggle)} style={{width:"100%",padding:"10px",borderRadius:8,border:"1px solid "+(peakToggle?"var(--primary)":"var(--border)"),background:peakToggle?"var(--primary-light)":"#fff",color:peakToggle?"var(--primary)":"var(--text)",fontWeight:600,fontSize:13,cursor:"pointer"}}>{peakToggle?"Peak +20% ON":"Peak +20% OFF"}</button>
+                </div>
+              </div>
+              <div style={{marginTop:24,padding:16,background:"#f9fafb",borderRadius:8,fontSize:12,color:"var(--text-muted)"}}>
+                <b>Backend:</b> {API} • <b>Status:</b> <span style={{color:backendStatus==="alive"?"#2ecc40":"#e6533c"}}>{backendStatus}</span> • <b>Orders:</b> {processed.length} • <b>Riders:</b> {ridersData.length}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      </>)}
+
       </main>
     </div>
   );
